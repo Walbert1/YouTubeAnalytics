@@ -1,8 +1,11 @@
-from googleapiclient.discovery import build
-from datetime import datetime, timedelta
+"""Thin wrapper around the YouTube Data API v3."""
 import os
+import re
 import threading
+from datetime import datetime, timedelta
+
 from dotenv import load_dotenv
+from googleapiclient.discovery import build
 
 load_dotenv()
 
@@ -13,6 +16,8 @@ if not api_key:
 _thread_local = threading.local()
 _video_cache: dict = {}
 _video_cache_lock = threading.Lock()
+
+_PERIOD_OFFSET_DAYS = {'week': 7, 'month': 30, 'year': 365}
 
 
 def _get_youtube():
@@ -29,7 +34,6 @@ def get_channel_stats(username: str) -> dict:
 
 
 def get_channel_tags(channel_id: str) -> list[str]:
-    import re
     try:
         resp = _get_youtube().channels().list(
             part='brandingSettings,snippet', id=channel_id
@@ -49,37 +53,19 @@ def get_channel_tags(channel_id: str) -> list[str]:
         return []
 
 
-def search_videos(query: str = 'firearms', max_results: int = 50,
-                  order: str = 'viewCount', region_code: str = 'US') -> dict:
-    return _get_youtube().search().list(
-        part='snippet',
-        q=query,
-        type='video',
-        maxResults=max_results,
-        order=order,
-        regionCode=region_code
-    ).execute()
+def search_videos(query: str, max_results: int = 50, region_code: str = 'US',
+                  order: str = 'viewCount', time_period: str | None = None) -> list[dict]:
+    """Search for videos, optionally restricted to a recency window.
 
-
-def search_videos_by_period(query: str, time_period: str,
-                             max_results: int, region_code: str) -> list[dict]:
-    now = datetime.utcnow()
-    offsets = {'week': 7, 'month': 30, 'year': 365}
-    published_after = None
-    if time_period in offsets:
-        published_after = (now - timedelta(days=offsets[time_period])).isoformat() + 'Z'
-
+    `time_period` is one of 'week', 'month', 'year', or None/anything else for all-time.
+    """
     kwargs = dict(
-        part='snippet',
-        q=query,
-        type='video',
-        maxResults=max_results,
-        order='viewCount',
-        regionCode=region_code,
+        part='snippet', q=query, type='video',
+        maxResults=max_results, order=order, regionCode=region_code,
     )
-    if published_after:
-        kwargs['publishedAfter'] = published_after
-
+    if time_period in _PERIOD_OFFSET_DAYS:
+        published_after = datetime.utcnow() - timedelta(days=_PERIOD_OFFSET_DAYS[time_period])
+        kwargs['publishedAfter'] = published_after.isoformat() + 'Z'
     return _get_youtube().search().list(**kwargs).execute().get('items', [])
 
 

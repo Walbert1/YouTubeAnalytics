@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from collections import Counter
 
-from analysis import run_niche_analysis, aggregate_across_queries, get_trending_shorts
+from core import CSV_EXPORTS, aggregate_across_queries, fetch_trending_shorts, run_niche_analysis
 
 st.set_page_config(
     page_title="YouTube Niche Analytics",
@@ -23,6 +22,11 @@ DEFAULT_QUERIES = [
 
 REGIONS = ['US', 'GB', 'CA', 'AU', 'DE', 'FR', 'JP', 'BR', 'IN', 'MX']
 TIME_PERIODS = ['week', 'month', 'year', 'all_time']
+
+VIDEO_COLUMN_LABELS = {
+    'title': 'Title', 'channel_name': 'Channel', 'views': 'Views',
+    'likes': 'Likes', 'comments': 'Comments', 'engagement_rate': 'Eng %', 'url': 'URL',
+}
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 st.sidebar.title("Settings")
@@ -52,7 +56,7 @@ def _fetch(queries_tuple: tuple, region: str, time_period: str, max_results: int
 
 @st.cache_data(show_spinner=False)
 def _fetch_trending_shorts(region: str, max_results: int) -> list[dict]:
-    return get_trending_shorts(region_code=region, max_results=max_results)
+    return fetch_trending_shorts(region_code=region, max_results=max_results)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -64,13 +68,43 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode('utf-8')
 
 
-def bar_chart(data: list[tuple], col_name: str, title: str):
+def bar_chart(data: list[tuple], col_name: str, title: str) -> None:
     df = counter_df(data[:20], col_name)
     fig = px.bar(df, x='Count', y=col_name, orientation='h', title=title,
                  color='Count', color_continuous_scale='Blues')
     fig.update_layout(yaxis={'categoryorder': 'total ascending'},
                       coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
     st.plotly_chart(fig, use_container_width=True)
+
+
+def video_table(videos: list[dict], sort_by_views: bool = True, limit: int | None = 50) -> pd.DataFrame:
+    """Shared table shape for the Shorts, Full Videos, and Trending Shorts tabs."""
+    if not videos:
+        return pd.DataFrame(columns=list(VIDEO_COLUMN_LABELS.values()))
+    df = pd.DataFrame(videos)[list(VIDEO_COLUMN_LABELS)].drop_duplicates('url')
+    if sort_by_views:
+        df = df.sort_values('views', ascending=False)
+    if limit is not None:
+        df = df.head(limit)
+    df = df.rename(columns=VIDEO_COLUMN_LABELS)
+    df['Eng %'] = df['Eng %'].round(2)
+    return df
+
+
+def render_video_section(videos: list[dict], tags: list[tuple], hashtags: list[tuple],
+                         empty_message: str, tag_label: str) -> None:
+    """Shared body for the Shorts and Full Videos tabs: table + tag/hashtag charts."""
+    if videos:
+        st.dataframe(video_table(videos), use_container_width=True, hide_index=True)
+    else:
+        st.info(empty_message)
+
+    st.markdown("---")
+    col1, col2 = st.columns(2)
+    with col1:
+        bar_chart(tags, 'Tag', f'Top Tags ({tag_label})')
+    with col2:
+        bar_chart(hashtags, 'Hashtag', f'Top Hashtags ({tag_label})')
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -154,35 +188,12 @@ else:
             s_tags = combined['shorts_tags'].most_common(20)
             s_hashtags = combined['shorts_hashtags'].most_common(20)
         else:
-            shorts_list = results[shorts_query_filter]['shorts']['videos']
-            s_tags = results[shorts_query_filter]['shorts']['top_tags']
-            s_hashtags = results[shorts_query_filter]['shorts']['top_hashtags']
+            shorts_section = results[shorts_query_filter]['shorts']
+            shorts_list = shorts_section['videos']
+            s_tags = shorts_section['top_tags']
+            s_hashtags = shorts_section['top_hashtags']
 
-        if shorts_list:
-            df_shorts = (
-                pd.DataFrame(shorts_list)[
-                    ['title', 'channel_name', 'views', 'likes', 'comments', 'engagement_rate', 'url']
-                ]
-                .sort_values('views', ascending=False)
-                .drop_duplicates('url')
-                .head(50)
-                .rename(columns={
-                    'title': 'Title', 'channel_name': 'Channel', 'views': 'Views',
-                    'likes': 'Likes', 'comments': 'Comments',
-                    'engagement_rate': 'Eng %', 'url': 'URL',
-                })
-            )
-            df_shorts['Eng %'] = df_shorts['Eng %'].round(2)
-            st.dataframe(df_shorts, use_container_width=True, hide_index=True)
-        else:
-            st.info("No shorts found for this selection.")
-
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-        with col1:
-            bar_chart(s_tags, 'Tag', 'Top Tags (Shorts)')
-        with col2:
-            bar_chart(s_hashtags, 'Hashtag', 'Top Hashtags (Shorts)')
+        render_video_section(shorts_list, s_tags, s_hashtags, "No shorts found for this selection.", "Shorts")
 
     # ── Full Videos ──────────────────────────────────────────────────────────────
     with tab_full:
@@ -199,35 +210,12 @@ else:
             f_tags = combined['full_tags'].most_common(20)
             f_hashtags = combined['full_hashtags'].most_common(20)
         else:
-            full_list = results[full_query_filter]['full_videos']['videos']
-            f_tags = results[full_query_filter]['full_videos']['top_tags']
-            f_hashtags = results[full_query_filter]['full_videos']['top_hashtags']
+            full_section = results[full_query_filter]['full_videos']
+            full_list = full_section['videos']
+            f_tags = full_section['top_tags']
+            f_hashtags = full_section['top_hashtags']
 
-        if full_list:
-            df_full = (
-                pd.DataFrame(full_list)[
-                    ['title', 'channel_name', 'views', 'likes', 'comments', 'engagement_rate', 'url']
-                ]
-                .sort_values('views', ascending=False)
-                .drop_duplicates('url')
-                .head(50)
-                .rename(columns={
-                    'title': 'Title', 'channel_name': 'Channel', 'views': 'Views',
-                    'likes': 'Likes', 'comments': 'Comments',
-                    'engagement_rate': 'Eng %', 'url': 'URL',
-                })
-            )
-            df_full['Eng %'] = df_full['Eng %'].round(2)
-            st.dataframe(df_full, use_container_width=True, hide_index=True)
-        else:
-            st.info("No full videos found for this selection.")
-
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-        with col1:
-            bar_chart(f_tags, 'Tag', 'Top Tags (Full Videos)')
-        with col2:
-            bar_chart(f_hashtags, 'Hashtag', 'Top Hashtags (Full Videos)')
+        render_video_section(full_list, f_tags, f_hashtags, "No full videos found for this selection.", "Full Videos")
 
     # ── Trending Shorts ──────────────────────────────────────────────────────────
     with tab_trending:
@@ -238,18 +226,7 @@ else:
         )
 
         if trending_shorts:
-            df_trending = (
-                pd.DataFrame(trending_shorts)[
-                    ['title', 'channel_name', 'views', 'likes', 'comments', 'engagement_rate', 'url']
-                ]
-                .drop_duplicates('url')
-                .rename(columns={
-                    'title': 'Title', 'channel_name': 'Channel', 'views': 'Views',
-                    'likes': 'Likes', 'comments': 'Comments',
-                    'engagement_rate': 'Eng %', 'url': 'URL',
-                })
-            )
-            df_trending['Eng %'] = df_trending['Eng %'].round(2)
+            df_trending = video_table(trending_shorts, sort_by_views=False, limit=None)
             st.dataframe(df_trending, use_container_width=True, hide_index=True)
         else:
             st.info("No trending Shorts found.")
@@ -259,17 +236,9 @@ else:
         st.subheader("Download CSVs")
         st.caption("All downloads reflect the current query/filter selection.")
 
-        exports = [
-            ("Tags — Shorts",      combined['shorts_tags'],     'tag',         'tags_shorts.csv'),
-            ("Tags — Full Videos", combined['full_tags'],       'tag',         'tags_full.csv'),
-            ("Hashtags — Shorts",  combined['shorts_hashtags'], 'hashtag',     'hashtags_shorts.csv'),
-            ("Hashtags — Full",    combined['full_hashtags'],   'hashtag',     'hashtags_full.csv'),
-            ("Channel Tags",       combined['channel_tags'],    'channel_tag', 'channel_tags.csv'),
-        ]
-
         cols = st.columns(3)
-        for i, (label, counter, col_name, filename) in enumerate(exports):
-            df = pd.DataFrame(counter.most_common(), columns=[col_name, 'count'])
+        for i, (label, key, col_name, filename) in enumerate(CSV_EXPORTS):
+            df = pd.DataFrame(combined[key].most_common(), columns=[col_name, 'count'])
             cols[i % 3].download_button(
                 label=f"Download: {label}",
                 data=to_csv_bytes(df),
@@ -280,27 +249,16 @@ else:
 
         st.markdown("---")
         st.subheader("Download All Videos")
-        if combined['all_shorts']:
-            df_all_shorts = pd.DataFrame(combined['all_shorts']).drop_duplicates('url')
-            st.download_button(
-                "Download All Shorts Data",
-                data=to_csv_bytes(df_all_shorts),
-                file_name='all_shorts.csv',
-                mime='text/csv',
-            )
-        if combined['all_full_videos']:
-            df_all_full = pd.DataFrame(combined['all_full_videos']).drop_duplicates('url')
-            st.download_button(
-                "Download All Full Videos Data",
-                data=to_csv_bytes(df_all_full),
-                file_name='all_full_videos.csv',
-                mime='text/csv',
-            )
-        if trending_shorts:
-            df_trending_export = pd.DataFrame(trending_shorts).drop_duplicates('url')
-            st.download_button(
-                "Download Trending Shorts Data",
-                data=to_csv_bytes(df_trending_export),
-                file_name='trending_shorts.csv',
-                mime='text/csv',
-            )
+        video_exports = [
+            ("Download All Shorts Data", combined['all_shorts'], 'all_shorts.csv'),
+            ("Download All Full Videos Data", combined['all_full_videos'], 'all_full_videos.csv'),
+            ("Download Trending Shorts Data", trending_shorts, 'trending_shorts.csv'),
+        ]
+        for label, videos, filename in video_exports:
+            if videos:
+                st.download_button(
+                    label,
+                    data=to_csv_bytes(pd.DataFrame(videos).drop_duplicates('url')),
+                    file_name=filename,
+                    mime='text/csv',
+                )
